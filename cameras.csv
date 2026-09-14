@@ -1,0 +1,31 @@
+id,name,lat,lng,dept
+cam01,Chiman Bhai Bridge,23.0645,72.5831,Ahmedabad Municipal Corp
+cam02,Janpath Intersection,23.0522,72.5855,Traffic Police
+cam03,O.N.G.C. Office,23.0841,72.5815,PSU Security
+cam04,Paldi Circle,23.012,72.5714,Smart City Command
+cam05,Visat Teen Rasta,23.104,72.589,Traffic Police
+cam06,Timbavadi Gate,21.5173,70.4566,Junagadh Police
+cam07,Gir Somnath Highway,20.9023,70.3664,State Highway Patrol
+cam08,Majewadi Gate,21.528,70.468,Junagadh Police
+cam09,Sarkhej-Gandhinagar Hwy,23.0012,72.5011,State Highway Patrol
+cam10,Ashram Road,23.0333,72.5722,Ahmedabad Municipal Corp
+cam11,SG Highway Toll,23.1012,72.5312,Transport Dept
+cam12,Tri Mandir Adalaj,23.1678,72.584,Transport Dept
+cam13,Gandhinagar Info City,23.1932,72.63,Smart City Command
+cam14,Pathikashram Circle,23.2201,72.6512,Traffic Police
+cam15,Koba Circle,23.1415,72.621,Traffic Police
+cam16,Rajkot Ring Road,22.281,70.7811,Rajkot Police
+cam17,Gondal Chowkdi,22.253,70.7915,Traffic Police
+cam18,Aji Dam Chokdi,22.2612,70.8201,Rajkot Police
+cam19,Bhavnagar Highway Entry,21.782,72.132,State Highway Patrol
+cam20,Surat Ring Road,21.192,72.821,Surat Municipal Corp
+cam21,Udhna Darwaja,21.1812,72.8315,Traffic Police
+cam22,Vadodara Express Toll,22.3115,73.181,Transport Dept
+cam23,Kala Ghoda Circle,22.302,73.1912,Vadodara Police
+cam24,Bhuj Highway Checkpost,23.2301,69.651,Border Security
+cam25,Mehsana Toll Plaza,23.5812,72.361,State Highway Patrol
+cam26,Palanpur Checkpost,24.161,72.3112,Border Security
+cam27,Godhra Highway,22.7712,73.611,State Highway Patrol
+cam28,Anand Vidyanagar Rd,22.541,72.9312,Traffic Police
+cam29,Nadiad Expressway,22.6912,72.851,Transport Dept
+cam30,Bharuch Narmada Bridge,21.7115,73.0012,State Highway Patrol
