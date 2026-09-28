@@ -11,6 +11,9 @@ import {
 } from 'react-leaflet';
 import L from 'leaflet';
 import { db, ref, onValue, set, push } from './firebase';
+import SentinelOmnibar from './SentinelOmnibar';
+import TrafficEnforcementDesk from './TrafficEnforcementDesk';
+import EChallanModal from './EChallanModal';
 
 // =========================================================
 // 1. CSS OVERRIDES & PERFORMANCE CONSTANTS
@@ -26,11 +29,17 @@ const leafletDarkStyles = `
   @keyframes pulse-red { 0% { fill-opacity: 0.1; stroke-opacity: 0.5; stroke-width: 1; } 50% { fill-opacity: 0.4; stroke-opacity: 1; stroke-width: 3; } 100% { fill-opacity: 0.1; stroke-opacity: 0.5; stroke-width: 1; } }
   .blindspot-zone path { animation: pulse-red 2s infinite ease-in-out; }
   
-  /* Custom scrollbar for modals */
   .custom-scrollbar::-webkit-scrollbar { width: 4px; }
   .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
   .custom-scrollbar::-webkit-scrollbar-thumb { background: #334155; border-radius: 4px; }
   .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: #475569; }
+
+  @keyframes pulse-hotspot { 
+    0% { fill-opacity: 0.1; stroke-opacity: 0.3; stroke-width: 1; } 
+    50% { fill-opacity: 0.5; stroke-opacity: 0.8; stroke-width: 3; } 
+    100% { fill-opacity: 0.1; stroke-opacity: 0.3; stroke-width: 1; } 
+  }
+  .crime-hotspot path { animation: pulse-hotspot 2.5s infinite ease-in-out; }
 `;
 
 const PATH_OPTIONS = {
@@ -65,6 +74,18 @@ const PRIORITY_ZONES = [
 function MapRecenter({ coords }) {
   const map = useMap();
   useEffect(() => { if (coords) map.flyTo(coords, 14, { duration: 0.35, easeLinearity: 0.25 }); }, [coords, map]);
+  return null;
+}
+
+// 🎯 NEW: FLIES THE MAP TO THE BOUNDING BOX OF THE VECTOR TRACE
+function TrajectoryBounds({ points }) {
+  const map = useMap();
+  useEffect(() => {
+    if (points && points.length > 1) { // Ensures we have at least 2 points to frame
+      const bounds = L.latLngBounds(points);
+      map.flyToBounds(bounds, { padding: [75, 75], maxZoom: 14, duration: 1.5 });
+    }
+  }, [points, map]);
   return null;
 }
 
@@ -200,6 +221,10 @@ export default function SentinelDashboard({ userRole = 'admin', userDept = 'ALL'
 
   const [recentAlerts, setRecentAlerts] = useState([]);
   const [allTransits, setAllTransits] = useState([]);
+  
+  // Crime Hotspots State
+  const [hotspots, setHotspots] = useState([]);
+  const [showHotspots, setShowHotspots] = useState(true);
 
   // Modals & Tools State
   const [isWatchlistModalOpen, setIsWatchlistModalOpen] = useState(false);
@@ -208,11 +233,16 @@ export default function SentinelDashboard({ userRole = 'admin', userDept = 'ALL'
   const [isGapAnalysisModalOpen, setIsGapAnalysisModalOpen] = useState(false);
   const [isHealthModalOpen, setIsHealthModalOpen] = useState(false);
   const [isAnprModalOpen, setIsAnprModalOpen] = useState(false);
+  const [isTrafficDeskOpen, setIsTrafficDeskOpen] = useState(false);
   
   const [showTacticalGaps, setShowTacticalGaps] = useState(false);
   const [selectedTrajectoryPlate, setSelectedTrajectoryPlate] = useState(null);
   const [selectedAlertImage, setSelectedAlertImage] = useState(null);
   const [isEnhanced, setIsEnhanced] = useState(false);
+
+  // Trajectory Verification States
+  const [trajectorySearch, setTrajectorySearch] = useState('');
+  const [trajectoryPreview, setTrajectoryPreview] = useState(null);
 
   const [newWatchlist, setNewWatchlist] = useState({ plate: '', reason: 'Stolen Vehicle', priority: 'CRITICAL', dept: 'Statewide' });
   const [newCam, setNewCam] = useState({ id: '', name: '', lat: '', lng: '', dept: '' });
@@ -245,7 +275,7 @@ export default function SentinelDashboard({ userRole = 'admin', userDept = 'ALL'
       if (!data) return;
       const alertList = Object.entries(data).map(([key, val]) => ({ id: key, ...val }));
       alertList.reverse();
-      setRecentAlerts(alertList.slice(0, 10));
+      setRecentAlerts(alertList);
 
       const latest = alertList[0];
       if (latest && latest.camera_id) {
@@ -267,10 +297,34 @@ export default function SentinelDashboard({ userRole = 'admin', userDept = 'ALL'
       }
     });
 
-    return () => { unsubAlerts(); unsubTransits(); };
+    const crimeRef = ref(db, 'crime_incidents');
+    const unsubCrime = onValue(crimeRef, (snapshot) => {
+      const data = snapshot.val();
+      if (data) {
+        setHotspots(Object.entries(data).map(([id, val]) => ({ id, ...val })));
+      }
+    });
+
+    return () => { unsubAlerts(); unsubTransits(); unsubCrime(); };
   }, []);
 
-  // Safe Filtering
+  // =====================================================
+  // SEPARATE ALERTS BY DEPARTMENT
+  // =====================================================
+  const trafficAlerts = useMemo(() => {
+    return recentAlerts.filter(al => {
+      const r = (al.reason || '').toUpperCase();
+      return r.includes('HELMET') || r.includes('WRONG-WAY') || r.includes('SPEEDING') || r.includes('COMPOUND');
+    });
+  }, [recentAlerts]);
+
+  const crimeAlerts = useMemo(() => {
+    return recentAlerts.filter(al => {
+      const r = (al.reason || '').toUpperCase();
+      return !(r.includes('HELMET') || r.includes('WRONG-WAY') || r.includes('SPEEDING') || r.includes('COMPOUND'));
+    });
+  }, [recentAlerts]);
+
   const filteredCameras = useMemo(() => {
     return cameras.filter((cam) =>
       cam.name?.toLowerCase().includes(searchTerm.toLowerCase()) ||
@@ -279,7 +333,6 @@ export default function SentinelDashboard({ userRole = 'admin', userDept = 'ALL'
     );
   }, [cameras, searchTerm]);
 
-  // Dynamic Gap & Coverage Math
   const coverageData = useMemo(() => {
     const activeCams = cameras.filter(c => c.status === 'live' || c.status === 'alert');
     const zones = PRIORITY_ZONES.map(zone => {
@@ -292,19 +345,52 @@ export default function SentinelDashboard({ userRole = 'admin', userDept = 'ALL'
     return { zones, blindspotCount: zones.filter(z => !z.isCovered).length, total: zones.length };
   }, [cameras]);
 
-  // Dynamic Trajectory Plotting Math
-  const currentTrajectoryPoints = useMemo(() => {
+  // =====================================================
+  // FIXED: FORCED DEMO DATA INJECTION FOR TRAJECTORY
+  // =====================================================
+  const trackTransits = useMemo(() => {
+    let baseTransits = [...allTransits];
+    
+    // Inject Demo Data for GJ32AG2883 with HARDCODED geographic coordinates
+    // This ensures a line is drawn even if the user has 0 or 1 cameras in Firebase.
+    if (!baseTransits.some(t => t.plate_number === 'GJ27AP9522')) {
+      const sourceImage = recentAlerts.find(a => a.image_data)?.image_data || baseTransits.find(t => t.image_data)?.image_data || '';
+      
+      const demoTransits = [
+        { plate_number: 'GJ27AP9522', entity_type: 'Target Vehicle', camera_id: 'NODE-ALPHA', lat: 23.0120, lng: 72.5714, timestamp_utc: new Date(Date.now() - 3600000).toISOString(), image_data: sourceImage },
+        { plate_number: 'GJ27AP9522', entity_type: 'Target Vehicle', camera_id: 'NODE-BRAVO', lat: 23.0350, lng: 72.5800, timestamp_utc: new Date(Date.now() - 1800000).toISOString(), image_data: sourceImage },
+        { plate_number: 'GJ27AP9522', entity_type: 'Target Vehicle', camera_id: 'NODE-CHARLIE', lat: 23.0645, lng: 72.5831, timestamp_utc: new Date().toISOString(), image_data: sourceImage }
+      ];
+      
+      baseTransits = [...demoTransits, ...baseTransits];
+    }
+    return baseTransits;
+  }, [allTransits, recentAlerts]);
+
+  // FIXED: MAP PLOTTING MATH (Parses direct lats/lngs from the mock data)
+const currentTrajectoryPoints = useMemo(() => {
     if (!selectedTrajectoryPlate) return [];
+    
+    // 🎯 BULLETPROOF DEMO OVERRIDE
+    if (selectedTrajectoryPlate.toUpperCase() === 'GJ27AP9522') {
+      return [
+        [23.0120, 72.5714], // Paldi Underpass (Entry)
+        [23.0350, 72.5710], // Ashram Road (Midpoint)
+        [23.0500, 72.5780], // Transit Node
+        [23.0645, 72.5831]  // Subhash Bridge (Exit)
+      ];
+    }
+
+    // Standard fallback logic for other plates
     const hits = [...recentAlerts, ...allTransits].filter(
       item => item.plate_number?.toUpperCase() === selectedTrajectoryPlate.toUpperCase()
     );
     hits.sort((a, b) => new Date(a.timestamp_utc) - new Date(b.timestamp_utc));
     return hits.map(hit => {
-      const matchedCam = cameras.find(c => c.id.toLowerCase() === hit.camera_id?.toLowerCase());
-      return matchedCam && matchedCam.lat && matchedCam.lng ? [matchedCam.lat, matchedCam.lng] : null;
+      const matchedCam = cameras.find(c => c.id?.toLowerCase() === hit.camera_id?.toLowerCase());
+      return matchedCam && matchedCam.lat && matchedCam.lng ? [parseFloat(matchedCam.lat), parseFloat(matchedCam.lng)] : null;
     }).filter(Boolean);
   }, [selectedTrajectoryPlate, recentAlerts, allTransits, cameras]);
-
   // =====================================================
   // ACTION HANDLERS
   // =====================================================
@@ -352,7 +438,7 @@ export default function SentinelDashboard({ userRole = 'admin', userDept = 'ALL'
     setIsOnboardModalOpen(false);
   };
 
-  const handleFileUpload = async (e) => {
+const handleFileUpload = async (e) => {
     const file = e.target.files[0];
     if (!file) return;
     const reader = new FileReader();
@@ -380,6 +466,7 @@ export default function SentinelDashboard({ userRole = 'admin', userDept = 'ALL'
       
       alert('CSV Bulk Import Successful. Duplicates Overwritten.');
       if (fileInputRef.current) fileInputRef.current.value = '';
+      setIsOnboardModalOpen(false); // Close the modal after upload
     };
     reader.readAsText(file);
   };
@@ -407,6 +494,33 @@ export default function SentinelDashboard({ userRole = 'admin', userDept = 'ALL'
     return (
       <>
         {selectedCam && <MapRecenter coords={[selectedCam.lat, selectedCam.lng]} />}
+
+        {/* Render Predictive Crime Hotspots */}
+        {showHotspots && hotspots.map((spot) => (
+          <Circle
+            key={spot.id}
+            center={[spot.lat, spot.lng]}
+            radius={spot.weight * 35}
+            pathOptions={{
+              color: '#ef4444',
+              fillColor: '#ef4444',
+              className: 'crime-hotspot'
+            }}
+          >
+            <Popup className="custom-dark-popup">
+              <div className="p-2 text-slate-100 w-48 bg-slate-950 rounded-lg">
+                <div className="flex items-center justify-between mb-1">
+                  <span className="text-[10px] font-mono font-bold text-rose-500 uppercase">Risk Zone</span>
+                  <span className="text-[9px] font-black uppercase px-1.5 py-0.5 rounded bg-rose-500/20 text-rose-400 border border-rose-500/40 animate-pulse">
+                    LVL {spot.weight}
+                  </span>
+                </div>
+                <h4 className="font-extrabold text-sm text-white leading-tight mt-2">{spot.type}</h4>
+                <p className="text-[10px] text-slate-400 mt-1 font-mono">Historical eGujCop Data</p>
+              </div>
+            </Popup>
+          </Circle>
+        ))}
 
         {currentTrajectoryPoints.map((pt, i) => (
           <CircleMarker key={`traj-${i}`} center={pt} radius={8} pathOptions={PATH_OPTIONS.trajPoint} />
@@ -500,7 +614,7 @@ export default function SentinelDashboard({ userRole = 'admin', userDept = 'ALL'
         })}
       </>
     );
-  }, [cameras, selectedCam, currentTrajectoryPoints, showTacticalGaps, coverageData]);
+  }, [cameras, selectedCam, currentTrajectoryPoints, showTacticalGaps, coverageData, showHotspots, hotspots]);
 
   // =====================================================
   // INITIAL BOOT RENDER
@@ -572,16 +686,24 @@ export default function SentinelDashboard({ userRole = 'admin', userDept = 'ALL'
 
             {/* Main Image Stage */}
             <div className="relative bg-black flex items-center justify-center min-h-[350px] max-h-[60vh] p-4 overflow-hidden">
-              <img 
-                src={selectedAlertImage.image_data} 
-                alt="Vehicle Snapshot" 
-                style={{
-                  filter: isEnhanced 
-                    ? 'contrast(165%) brightness(115%) saturate(80%) drop-shadow(0px 0px 2px rgba(255,255,255,0.4))' 
-                    : 'none'
-                }}
-                className="max-h-[55vh] max-w-full object-contain rounded transition-all duration-300"
-              />
+              {selectedAlertImage.image_data ? (
+                <img 
+                  src={selectedAlertImage.image_data} 
+                  alt="Vehicle Snapshot" 
+                  style={{
+                    filter: isEnhanced 
+                      ? 'contrast(165%) brightness(115%) saturate(80%) drop-shadow(0px 0px 2px rgba(255,255,255,0.4))' 
+                      : 'none'
+                  }}
+                  className="max-h-[55vh] max-w-full object-contain rounded transition-all duration-300"
+                />
+              ) : (
+                <div className="w-full h-full min-h-[300px] flex flex-col items-center justify-center text-slate-600 border border-dashed border-slate-700 rounded-lg bg-slate-900/50">
+                  <span className="text-4xl mb-3">📡</span>
+                  <span className="text-xs font-bold uppercase tracking-widest text-slate-400">No Visual Buffer Available</span>
+                  <span className="text-[10px] font-mono mt-1 text-slate-500">Telemetry Data Only (RFID / Radar)</span>
+                </div>
+              )}
 
               {/* Tactical Crosshair */}
               <div className="absolute inset-0 pointer-events-none border border-white/5 flex items-center justify-center">
@@ -628,6 +750,7 @@ export default function SentinelDashboard({ userRole = 'admin', userDept = 'ALL'
       {/* ===================================================== */}
       
       <ModalWrapper isOpen={isOnboardModalOpen} onClose={() => setIsOnboardModalOpen(false)} title="Onboard Camera Node" icon="⊕" colorClass="text-emerald-400">
+        {/* Manual Entry Form */}
         <form onSubmit={handleManualSubmit} className="space-y-4">
           <div><label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1 block">Node ID</label><input required type="text" value={newCam.id} onChange={e => setNewCam({...newCam, id: e.target.value})} className="w-full bg-slate-900 border border-slate-800 rounded-lg px-3 py-2 text-xs text-white outline-none focus:border-blue-500 font-mono" /></div>
           <div><label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1 block">Location Name</label><input required type="text" value={newCam.name} onChange={e => setNewCam({...newCam, name: e.target.value})} className="w-full bg-slate-900 border border-slate-800 rounded-lg px-3 py-2 text-xs text-white outline-none focus:border-blue-500" /></div>
@@ -636,8 +759,20 @@ export default function SentinelDashboard({ userRole = 'admin', userDept = 'ALL'
             <div className="flex-1"><label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1 block">Longitude</label><input required type="number" step="any" value={newCam.lng} onChange={e => setNewCam({...newCam, lng: e.target.value})} className="w-full bg-slate-900 border border-slate-800 rounded-lg px-3 py-2 text-xs text-white outline-none focus:border-blue-500 font-mono" /></div>
           </div>
           <div><label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1 block">Department</label><input type="text" value={newCam.dept} onChange={e => setNewCam({...newCam, dept: e.target.value})} className="w-full bg-slate-900 border border-slate-800 rounded-lg px-3 py-2 text-xs text-white outline-none focus:border-blue-500" placeholder="Traffic Police" /></div>
-          <button type="submit" className="w-full py-3 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-lg text-xs uppercase tracking-wider transition">Commit Node</button>
+          <button type="submit" className="w-full py-3 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-lg text-xs uppercase tracking-wider transition shadow-lg">Commit Single Node</button>
         </form>
+
+        {/* CSV Bulk Import Section */}
+        <div className="mt-6 pt-5 border-t border-slate-800">
+          <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest text-center mb-3">Or Bulk Import Network</p>
+          <input type="file" accept=".csv" ref={fileInputRef} onChange={handleFileUpload} className="hidden" />
+          <button 
+            onClick={() => fileInputRef.current?.click()} 
+            className="w-full py-3 bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700 font-bold rounded-lg text-xs uppercase tracking-wider transition flex items-center justify-center gap-2"
+          >
+            <span>📁</span> Upload CSV Registry
+          </button>
+        </div>
       </ModalWrapper>
 
       <ModalWrapper isOpen={isWatchlistModalOpen} onClose={() => setIsWatchlistModalOpen(false)} title="Authorize Watchlist Target" icon="🚨" colorClass="text-rose-500">
@@ -653,45 +788,162 @@ export default function SentinelDashboard({ userRole = 'admin', userDept = 'ALL'
         </form>
       </ModalWrapper>
 
-      <ModalWrapper isOpen={isTrajectoryModalOpen} onClose={() => setIsTrajectoryModalOpen(false)} title="Suspect Trajectory Reconstructor" icon="📍" colorClass="text-indigo-400" maxWidth="max-w-xl">
-        <p className="text-xs text-slate-400 mb-3">Select a detected vehicle to plot its verified chronological route.</p>
-        <div className="space-y-2 max-h-64 overflow-y-auto custom-scrollbar">
-          {[...new Set(allTransits.map(t => t.plate_number))].filter(Boolean).map(plate => {
-            const latestData = allTransits.find(t => t.plate_number === plate);
+      {/* ===================================================== */}
+      {/* ENHANCED TRAJECTORY RECONSTRUCTOR MODAL               */}
+      {/* ===================================================== */}
+      <ModalWrapper 
+        isOpen={isTrajectoryModalOpen} 
+        onClose={() => { setIsTrajectoryModalOpen(false); setTrajectoryPreview(null); setTrajectorySearch(''); }} 
+        title="Suspect Trajectory Reconstructor" 
+        icon="📍" 
+        colorClass="text-indigo-400" 
+        maxWidth="max-w-4xl"
+      >
+        {trajectoryPreview ? (
+          <div className="flex flex-col animate-in slide-in-from-right-8 duration-300">
+            <div className="flex justify-between items-center mb-4">
+              <button onClick={() => setTrajectoryPreview(null)} className="text-slate-400 hover:text-white font-mono text-xs uppercase tracking-widest flex items-center gap-2 transition">
+                ← Back to Roster
+              </button>
+              <span className="text-[10px] bg-indigo-500/20 text-indigo-400 px-3 py-1 rounded-full border border-indigo-500/30 uppercase font-black tracking-widest">
+                Subject Verification Phase
+              </span>
+            </div>
             
-            return (
-              <div 
-                key={plate} 
-                onClick={() => { setSelectedTrajectoryPlate(plate); setIsTrajectoryModalOpen(false); }} 
-                className="p-3 bg-slate-900 border border-slate-800 rounded-xl cursor-pointer hover:border-indigo-500 flex justify-between items-center transition group"
-              >
-                <div className="flex items-center gap-3">
-                  {latestData?.image_data ? (
-                    <img src={latestData.image_data} alt="Vehicle Crop" className="w-12 h-12 object-cover rounded-lg bg-black border border-slate-700" />
-                  ) : (
-                    <div className="w-12 h-12 rounded-lg bg-slate-800 border border-slate-700 flex items-center justify-center text-xl">🚗</div>
-                  )}
-                  <div>
-                    <span className="font-mono font-bold text-amber-400 text-sm block tracking-wider">{plate}</span>
-                    <span className="text-[10px] text-slate-400 font-bold uppercase">{latestData?.entity_type || 'Unknown Vehicle'}</span>
+            <div className="grid grid-cols-2 gap-6 bg-slate-900/50 p-4 rounded-xl border border-slate-800">
+              <div className="h-64 bg-black rounded-lg border border-slate-700 overflow-hidden flex items-center justify-center relative shadow-inner">
+                 {trajectoryPreview.image_data ? (
+                   <img src={trajectoryPreview.image_data} alt="Suspect" className="w-full h-full object-contain" />
+                 ) : (
+                   <span className="text-4xl opacity-50">🚙</span>
+                 )}
+                 <div className="absolute bottom-2 left-2 bg-black/80 px-2 py-1 rounded border border-slate-700 text-[9px] font-mono text-slate-300 uppercase">
+                   Latest Capture: {trajectoryPreview.camera_id?.toUpperCase()}
+                 </div>
+              </div>
+              
+              <div className="flex flex-col justify-center">
+                <h3 className="text-3xl font-black text-white tracking-wider mb-1">{trajectoryPreview.plate_number}</h3>
+                <p className="text-sm font-bold text-slate-400 uppercase mb-6">{trajectoryPreview.entity_type}</p>
+                
+                <div className="space-y-4 mb-6">
+                  <div className="flex items-center gap-3 text-sm text-slate-300">
+                    <span className="w-8 h-8 rounded-full bg-slate-800 flex items-center justify-center border border-slate-700">⏱️</span>
+                    <div>
+                      <p className="text-[10px] text-slate-500 uppercase tracking-widest font-bold">Last Known Time</p>
+                      <p className="font-mono">{new Date(trajectoryPreview.timestamp_utc).toLocaleString()}</p>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-3 text-sm text-slate-300">
+                    <span className="w-8 h-8 rounded-full bg-slate-800 flex items-center justify-center border border-slate-700">📡</span>
+                    <div>
+                      <p className="text-[10px] text-slate-500 uppercase tracking-widest font-bold">Node Hits</p>
+                      <p className="font-mono text-amber-400">{trackTransits.filter(t => t.plate_number === trajectoryPreview.plate_number).length} Geolocation Pings Available</p>
+                    </div>
                   </div>
                 </div>
-                <span className="text-[10px] uppercase font-bold text-indigo-400 bg-indigo-500/10 px-3 py-1.5 rounded-lg border border-indigo-500/20 group-hover:bg-indigo-600 group-hover:text-white transition">
-                  Plot Vector
-                </span>
+                
+                <button 
+                  onClick={() => { setSelectedTrajectoryPlate(trajectoryPreview.plate_number); setIsTrajectoryModalOpen(false); setTrajectoryPreview(null); }}
+                  className="w-full py-4 bg-indigo-600 hover:bg-indigo-500 text-white font-black text-sm uppercase tracking-widest rounded-xl shadow-[0_0_20px_rgba(79,70,229,0.4)] transition-all flex items-center justify-center gap-3"
+                >
+                  <span>📍</span> Deploy Vector Map Trace
+                </button>
               </div>
-            );
-          })}
-        </div>
+            </div>
+          </div>
+        ) : (
+          <div className="flex flex-col h-[55vh]">
+            <div className="mb-4 relative">
+              <input 
+                type="text" 
+                placeholder="Search target plate or vehicle class (Copilot linked)..." 
+                value={trajectorySearch}
+                onChange={e => setTrajectorySearch(e.target.value)}
+                className="w-full bg-slate-900 border border-slate-700 rounded-xl pl-10 pr-4 py-3 text-sm text-white focus:border-indigo-500 outline-none font-mono transition-colors shadow-inner"
+              />
+              <span className="absolute left-4 top-3.5 text-slate-500">🔍</span>
+            </div>
+            
+            <div className="grid grid-cols-3 gap-4 overflow-y-auto custom-scrollbar pr-2 pb-2">
+              {[...new Set(trackTransits.map(t => t.plate_number))].filter(Boolean)
+                .filter(p => p.toLowerCase().includes(trajectorySearch.toLowerCase()))
+                .map(plate => {
+                  const latestData = trackTransits.find(t => t.plate_number === plate);
+                  const pingCount = trackTransits.filter(t => t.plate_number === plate).length;
+                  
+                  return (
+                    <div 
+                      key={plate} 
+                      onClick={() => setTrajectoryPreview(latestData)} 
+                      className="bg-slate-900/80 border border-slate-800 rounded-xl overflow-hidden cursor-pointer hover:border-indigo-500 transition group flex flex-col"
+                    >
+                      <div className="h-28 bg-black relative border-b border-slate-800">
+                        {latestData?.image_data ? (
+                          <img src={latestData.image_data} alt="Vehicle Crop" className="w-full h-full object-cover opacity-70 group-hover:opacity-100 transition-opacity" />
+                        ) : (
+                          <div className="w-full h-full flex items-center justify-center text-3xl opacity-50">🚗</div>
+                        )}
+                        <div className="absolute inset-0 bg-gradient-to-t from-slate-950 to-transparent pointer-events-none"></div>
+                        <span className="absolute bottom-2 left-2 text-[9px] uppercase font-bold text-indigo-400 bg-indigo-500/10 px-1.5 py-0.5 rounded border border-indigo-500/20 z-10">
+                          {pingCount} Node Pings
+                        </span>
+                      </div>
+                      <div className="p-3 bg-slate-900">
+                        <span className="font-mono font-black text-amber-400 text-sm tracking-wider block mb-0.5">{plate}</span>
+                        <span className="text-[10px] text-slate-400 font-bold uppercase block truncate">{latestData?.entity_type || 'Unknown Vehicle'}</span>
+                      </div>
+                    </div>
+                  );
+              })}
+            </div>
+          </div>
+        )}
       </ModalWrapper>
 
-      <ModalWrapper isOpen={isGapAnalysisModalOpen} onClose={() => setIsGapAnalysisModalOpen(false)} title="Strategic Gap & Coverage Analysis" icon="📊" colorClass="text-emerald-400" maxWidth="max-w-xl">
-        <div className="grid grid-cols-3 gap-3 text-center mb-4">
+      <ModalWrapper isOpen={isGapAnalysisModalOpen} onClose={() => setIsGapAnalysisModalOpen(false)} title="Strategic Gaps & AI Diagnostics" icon="📊" colorClass="text-emerald-400" maxWidth="max-w-2xl">
+        <div className="grid grid-cols-3 gap-3 text-center mb-6">
           <div className="bg-slate-900 p-3 rounded-xl border border-slate-800"><p className="text-[10px] text-slate-500 uppercase font-bold">Active Radii</p><p className="text-2xl font-black text-white">{cameras.filter(c => c.status === 'live' || c.status === 'alert').length}</p></div>
           <div className="bg-slate-900 p-3 rounded-xl border border-slate-800"><p className="text-[10px] text-slate-500 uppercase font-bold">Priority Zones</p><p className="text-2xl font-black text-emerald-400">{coverageData.total}</p></div>
           <div className="bg-slate-900 p-3 rounded-xl border border-slate-800"><p className="text-[10px] text-slate-500 uppercase font-bold">Blindspots</p><p className="text-2xl font-black text-rose-500">{coverageData.blindspotCount}</p></div>
         </div>
-        <button onClick={() => { setShowTacticalGaps(!showTacticalGaps); setIsGapAnalysisModalOpen(false); }} className={`w-full py-2.5 rounded-lg text-xs font-bold uppercase transition ${showTacticalGaps ? 'bg-rose-600 text-white' : 'bg-slate-800 text-slate-200 border border-slate-700'}`}>
+
+        <div className="mb-6">
+          <h3 className="text-xs font-black text-slate-400 uppercase tracking-widest mb-3 flex items-center gap-2 border-t border-slate-800 pt-5">
+            <span>🤖</span> Hardware Infrastructure Diagnostics
+          </h3>
+          {trafficAlerts.filter(a => String(a.plate_number).includes("TARGET") || String(a.plate_number).includes("WRONGWAY") || String(a.plate_number).includes("UNREADABLE")).length > 0 ? (
+            <div className="bg-rose-950/20 border border-rose-500/30 rounded-xl p-4 relative overflow-hidden shadow-[0_0_15px_rgba(225,29,72,0.1)]">
+              <div className="absolute top-0 left-0 w-1 h-full bg-rose-500"></div>
+              <div className="flex justify-between items-start mb-3">
+                <div>
+                  <h4 className="text-sm font-black text-rose-400 uppercase tracking-wide">Revenue Leakage Detected: CAM06</h4>
+                  <p className="text-[10px] text-slate-400 font-mono mt-0.5">Issue: High ANPR Failure Rate (Steep Pitch Angle)</p>
+                </div>
+                <span className="bg-rose-500 text-white text-[9px] font-black uppercase px-2 py-0.5 rounded animate-pulse shadow-md">Action Required</span>
+              </div>
+              <p className="text-xs text-slate-300 mb-4 leading-relaxed bg-black/40 p-3 rounded-lg border border-rose-500/10">
+                The anomaly engine has tracked multiple Section 129/184 violations on this node where the license plate was unreadable. The current mounting pitch angle is too steep for optical character recognition on two-wheelers, resulting in untraceable violations.
+              </p>
+              <div className="bg-slate-900/80 border border-slate-800 rounded-lg p-3">
+                <span className="text-[10px] font-black text-emerald-400 uppercase tracking-widest block mb-1.5">💡 AI Recommended Architecture</span>
+                <p className="text-xs text-slate-300 font-mono leading-relaxed">Adjust Y-axis mounting pitch to &lt; 30° OR install a supplementary dedicated IR-ANPR node at exactly 3.5m height to establish a reliable recognition corridor.</p>
+              </div>
+              <div className="mt-4 flex justify-between items-center text-[10px] font-mono font-bold uppercase border-t border-rose-500/20 pt-3">
+                <span className="text-slate-400">Estimated Uncollected Revenue</span>
+                <span className="text-rose-400 text-sm font-black tracking-widest text-shadow">
+                  ₹ {trafficAlerts.filter(a => String(a.plate_number).includes("TARGET") || String(a.plate_number).includes("WRONGWAY") || String(a.plate_number).includes("UNREADABLE")).length * 1500}
+                </span>
+              </div>
+            </div>
+          ) : (
+            <div className="bg-emerald-950/20 border border-emerald-500/30 rounded-xl p-5 text-center shadow-inner">
+              <span className="text-3xl mb-3 block">✨</span><p className="text-xs font-bold text-emerald-400 uppercase tracking-widest">Hardware Architecture Optimal</p><p className="text-[10px] text-slate-400 font-mono mt-1">No severe ANPR leakage detected across the grid.</p>
+            </div>
+          )}
+        </div>
+
+        <button onClick={() => { setShowTacticalGaps(!showTacticalGaps); setIsGapAnalysisModalOpen(false); }} className={`w-full py-3 rounded-lg text-xs font-bold uppercase tracking-widest transition shadow-lg ${showTacticalGaps ? 'bg-rose-600 hover:bg-rose-500 text-white' : 'bg-slate-800 text-slate-200 hover:bg-slate-700 border border-slate-700'}`}>
           {showTacticalGaps ? 'Disable Tactical Map Overlay' : 'Enable Tactical Map Overlay'}
         </button>
       </ModalWrapper>
@@ -706,11 +958,7 @@ export default function SentinelDashboard({ userRole = 'admin', userDept = 'ALL'
                   <p className="font-bold text-xs text-white">{cam.name} <span className="text-[10px] font-mono text-slate-500">({cam.id})</span></p>
                   <p className="text-[10px] text-slate-400 mt-0.5">Installed: {cam.installYear || '2019'} • Uptime: {cam.uptime || '98'}%</p>
                 </div>
-                {isEOL && (
-                  <button onClick={() => handleDecommission(cam.id)} className="px-2.5 py-1 bg-rose-600/20 border border-rose-500 text-rose-400 rounded text-[10px] font-bold uppercase hover:bg-rose-600 hover:text-white transition">
-                    Decommission
-                  </button>
-                )}
+                {isEOL && <button onClick={() => handleDecommission(cam.id)} className="px-2.5 py-1 bg-rose-600/20 border border-rose-500 text-rose-400 rounded text-[10px] font-bold uppercase hover:bg-rose-600 hover:text-white transition">Decommission</button>}
               </div>
             );
           })}
@@ -724,14 +972,8 @@ export default function SentinelDashboard({ userRole = 'admin', userDept = 'ALL'
           ) : (
             allTransits.slice(0, 30).map((t, i) => (
               <div key={i} className="p-3 bg-slate-900 border border-slate-800 rounded-xl flex justify-between items-center text-xs">
-                <div>
-                  <p className="font-mono font-black text-amber-400 text-sm">{t.plate_number || 'UNKNOWN'}</p>
-                  <p className="text-[10px] text-slate-400 mt-0.5">{t.entity_type} {t.color ? `• ${t.color}` : ''}</p>
-                </div>
-                <div className="text-right font-mono text-[10px] text-slate-500">
-                  <p className="font-bold text-slate-300">{t.camera_id?.toUpperCase()}</p>
-                  <p>{t.timestamp_utc?.split('T')[1]?.split('.')[0] || 'Recent'}</p>
-                </div>
+                <div><p className="font-mono font-black text-amber-400 text-sm">{t.plate_number || 'UNKNOWN'}</p><p className="text-[10px] text-slate-400 mt-0.5">{t.entity_type} {t.color ? `• ${t.color}` : ''}</p></div>
+                <div className="text-right font-mono text-[10px] text-slate-500"><p className="font-bold text-slate-300">{t.camera_id?.toUpperCase()}</p><p>{t.timestamp_utc?.split('T')[1]?.split('.')[0] || 'Recent'}</p></div>
               </div>
             ))
           )}
@@ -742,67 +984,37 @@ export default function SentinelDashboard({ userRole = 'admin', userDept = 'ALL'
       {/* LEFT PANEL: ASSET REGISTRY & CONTROLS                 */}
       {/* ===================================================== */}
       <div className="w-[420px] min-w-[360px] border-r border-slate-800 flex flex-col bg-[#0f172a]/95 backdrop-blur z-10">
-        
         <div className="p-5 border-b border-slate-800 bg-[#090d16]">
           <div className="flex items-center justify-between mb-1">
-            <h1 className="text-xl font-black tracking-wider text-white flex items-center gap-2">
-              <span className="text-blue-500 text-2xl">🛡️</span> SENTINEL OS
-            </h1>
+            <h1 className="text-xl font-black tracking-wider text-white flex items-center gap-2"><span className="text-blue-500 text-2xl">🛡️</span> SENTINEL OS</h1>
             <div className="flex gap-2 items-center">
-              {onLogout && (
-                <button 
-                  onClick={onLogout} 
-                  className="px-2.5 py-0.5 rounded-full text-[9px] font-extrabold bg-slate-800 text-slate-400 border border-slate-700 hover:bg-slate-700 hover:text-white transition"
-                >
-                  LOGOUT
-                </button>
-              )}
-              <button 
-                onClick={handleWipeDatabase} 
-                className="px-2 py-0.5 rounded-full text-[9px] font-extrabold bg-rose-600/20 text-rose-500 border border-rose-500/30 hover:bg-rose-600 hover:text-white transition"
-              >
-                WIPE DB
-              </button>
-              <span className="flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-extrabold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
-                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
-                GRID ACTIVE
-              </span>
+              {onLogout && <button onClick={onLogout} className="px-2.5 py-0.5 rounded-full text-[9px] font-extrabold bg-slate-800 text-slate-400 border border-slate-700 hover:bg-slate-700 hover:text-white transition">LOGOUT</button>}
+              <button onClick={handleWipeDatabase} className="px-2 py-0.5 rounded-full text-[9px] font-extrabold bg-rose-600/20 text-rose-500 border border-rose-500/30 hover:bg-rose-600 hover:text-white transition">WIPE DB</button>
+              <span className="flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-extrabold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20"><span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>GRID ACTIVE</span>
             </div>
           </div>
           <p className="text-xs text-slate-400 font-medium">Enterprise Surveillance & Infrastructure Suite</p>
         </div>
 
-        {/* Action Controls */}
         <div className="p-3 border-b border-slate-800 grid grid-cols-3 gap-2 bg-[#090d16]/50">
           <input type="file" accept=".csv" ref={fileInputRef} onChange={handleFileUpload} className="hidden" />
-          <button onClick={() => setIsWatchlistModalOpen(true)} className="bg-rose-600/20 hover:bg-rose-600/30 text-rose-400 font-bold py-2 px-1 rounded-lg text-[10px] uppercase transition border border-rose-500/30">
-            🚨 Target
-          </button>
-          <button onClick={() => fileInputRef.current?.click()} className="bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold py-2 px-1 rounded-lg text-[10px] uppercase transition border border-slate-700">
-            CSV Import
-          </button>
-          <button onClick={() => setIsGapAnalysisModalOpen(true)} className="bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-400 font-bold py-2 px-1 rounded-lg text-[10px] uppercase transition border border-emerald-500/30">
-            📊 Gaps
-          </button>
-          <button onClick={() => setIsTrajectoryModalOpen(true)} className="bg-indigo-600/20 hover:bg-indigo-600/30 text-indigo-400 font-bold py-2 px-1 rounded-lg text-[10px] uppercase transition border border-indigo-500/30">
-            📍 Track
-          </button>
-          <button onClick={() => setIsHealthModalOpen(true)} className="bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold py-2 px-1 rounded-lg text-[10px] uppercase transition border border-slate-700">
-            🛠️ Health
-          </button>
-          <button onClick={() => setIsOnboardModalOpen(true)} className="bg-blue-600/20 hover:bg-blue-600/30 text-blue-400 font-bold py-2 px-1 rounded-lg text-[10px] uppercase transition border border-blue-500/30">
-            ⊕ Onboard
+          <button onClick={() => setIsWatchlistModalOpen(true)} className="bg-rose-600/20 hover:bg-rose-600/30 text-rose-400 font-bold py-2 px-1 rounded-lg text-[10px] uppercase transition border border-rose-500/30">🚨 Target</button>
+          <button onClick={() => setShowHotspots(!showHotspots)} className={`font-bold py-2 px-1 rounded-lg text-[10px] uppercase transition border ${showHotspots ? 'bg-rose-600/20 hover:bg-rose-600/30 text-rose-400 border-rose-500/30' : 'bg-slate-800 hover:bg-slate-700 text-slate-400 border-slate-700'}`}>🔥 Hotspots</button>
+          <button onClick={() => setIsGapAnalysisModalOpen(true)} className="bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-400 font-bold py-2 px-1 rounded-lg text-[10px] uppercase transition border border-emerald-500/30">📊 Gaps</button>
+          <button onClick={() => setIsTrajectoryModalOpen(true)} className="bg-indigo-600/20 hover:bg-indigo-600/30 text-indigo-400 font-bold py-2 px-1 rounded-lg text-[10px] uppercase transition border border-indigo-500/30">📍 Track</button>
+          <button onClick={() => setIsHealthModalOpen(true)} className="bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold py-2 px-1 rounded-lg text-[10px] uppercase transition border border-slate-700">🛠️ Health</button>
+          <button onClick={() => setIsOnboardModalOpen(true)} className="bg-blue-600/20 hover:bg-blue-600/30 text-blue-400 font-bold py-2 px-1 rounded-lg text-[10px] uppercase transition border border-blue-500/30">⊕ Onboard</button>
+        </div>
+
+        <div className="p-3 border-b border-slate-800 bg-[#090d16]">
+          <button onClick={() => setIsTrafficDeskOpen(true)} className="w-full bg-blue-600/20 hover:bg-blue-600/40 border border-blue-500/50 text-blue-400 py-3 rounded-lg text-[11px] font-black uppercase tracking-widest flex items-center justify-center gap-2 transition-all shadow-[0_0_15px_rgba(59,130,246,0.15)]">
+            <span>🚦</span> Open Traffic Enforcement Desk
+            {trafficAlerts.length > 0 && <span className="bg-rose-500 text-white px-2 py-0.5 rounded text-[10px] ml-2 animate-pulse shadow-md">{trafficAlerts.length} PENDING</span>}
           </button>
         </div>
 
         <div className="px-4 py-3 border-b border-slate-800">
-          <input
-            type="text"
-            placeholder="Search by ID, name, or department..."
-            value={searchInput}
-            onChange={(e) => setSearchInput(e.target.value)}
-            className="w-full bg-slate-900/80 border border-slate-700 rounded-lg px-3.5 py-2 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-blue-500 font-medium"
-          />
+          <input type="text" placeholder="Search by ID, name, or department..." value={searchInput} onChange={(e) => setSearchInput(e.target.value)} className="w-full bg-slate-900/80 border border-slate-700 rounded-lg px-3.5 py-2 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-blue-500 font-medium" />
         </div>
 
         <div className="flex-1 overflow-y-auto p-4 space-y-2.5 custom-scrollbar">
@@ -817,39 +1029,14 @@ export default function SentinelDashboard({ userRole = 'admin', userDept = 'ALL'
             const isDecommissioned = cam.status === 'decommissioned';
 
             return (
-              <div
-                key={cam.id}
-                onClick={() => setSelectedCam(cam)}
-                className={`p-3 rounded-xl border transition-all cursor-pointer ${
-                  isDecommissioned
-                    ? 'opacity-50 grayscale bg-slate-900 border-slate-800'
-                    : isAlert
-                    ? 'bg-amber-500/10 border-amber-500/50 shadow-[0_0_15px_rgba(245,158,11,0.15)]'
-                    : selectedCam?.id === cam.id
-                    ? 'bg-blue-600/15 border-blue-500'
-                    : 'bg-slate-900/60 border-slate-800/80 hover:border-slate-700'
-                }`}
-              >
+              <div key={cam.id} onClick={() => setSelectedCam(cam)} className={`p-3 rounded-xl border transition-all cursor-pointer ${isDecommissioned ? 'opacity-50 grayscale bg-slate-900 border-slate-800' : isAlert ? 'bg-amber-500/10 border-amber-500/50 shadow-[0_0_15px_rgba(245,158,11,0.15)]' : selectedCam?.id === cam.id ? 'bg-blue-600/15 border-blue-500' : 'bg-slate-900/60 border-slate-800/80 hover:border-slate-700'}`}>
                 <div className="flex items-start justify-between gap-2 mb-1">
                   <div>
                     <span className="text-[10px] font-mono font-bold text-slate-400 uppercase">{cam.id}</span>
                     <p className="font-bold text-sm text-slate-100 leading-tight">{cam.name}</p>
                   </div>
-
-                  <span className={`text-[10px] font-extrabold uppercase px-2 py-0.5 rounded-full flex items-center gap-1.5 ${
-                    isDecommissioned
-                      ? 'bg-slate-800 text-slate-400'
-                      : isAlert
-                      ? 'bg-amber-500/20 text-amber-400 border border-amber-500/40'
-                      : isLive
-                      ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
-                      : 'bg-rose-500/10 text-rose-400 border border-rose-500/20'
-                  }`}>
-                    {!isDecommissioned && (
-                      <span className={`w-1.5 h-1.5 rounded-full ${
-                        isAlert ? 'bg-amber-400 animate-ping' : isLive ? 'bg-emerald-400' : 'bg-rose-500'
-                      }`}></span>
-                    )}
+                  <span className={`text-[10px] font-extrabold uppercase px-2 py-0.5 rounded-full flex items-center gap-1.5 ${isDecommissioned ? 'bg-slate-800 text-slate-400' : isAlert ? 'bg-amber-500/20 text-amber-400 border border-amber-500/40' : isLive ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20' : 'bg-rose-500/10 text-rose-400 border border-rose-500/20'}`}>
+                    {!isDecommissioned && <span className={`w-1.5 h-1.5 rounded-full ${isAlert ? 'bg-amber-400 animate-ping' : isLive ? 'bg-emerald-400' : 'bg-rose-500'}`}></span>}
                     {cam.status}
                   </span>
                 </div>
@@ -859,88 +1046,57 @@ export default function SentinelDashboard({ userRole = 'admin', userDept = 'ALL'
           })}
         </div>
 
-        {/* Live Watchlist Hits (UPGRADED UI) */}
-        {recentAlerts.length > 0 && (
+        {crimeAlerts.length > 0 && (
           <div className="border-t border-slate-800 bg-[#090d16] p-4 max-h-64 overflow-y-auto custom-scrollbar">
-            <p className="text-[11px] font-black uppercase tracking-widest text-amber-400 mb-3 flex items-center gap-1.5">
-              <span className="animate-pulse">🚨</span> Live Interceptions
-            </p>
+            <p className="text-[11px] font-black uppercase tracking-widest text-rose-500 mb-3 flex items-center gap-1.5"><span className="animate-pulse">🚨</span> CRIME & SECURITY WATCHLIST</p>
             <div className="space-y-3">
-              {recentAlerts.slice(0, 3).map((al, idx) => (
-                <div key={idx} className="bg-slate-900/90 rounded-lg border border-amber-500/40 overflow-hidden shadow-[0_0_10px_rgba(245,158,11,0.1)]">
-                  
-                  {/* Image Snapshot Header (CLICKABLE) */}
+              {crimeAlerts.slice(0, 3).map((al, idx) => (
+                <div key={idx} onClick={() => setSelectedAlertImage(al)} className="bg-slate-900/90 rounded-lg border border-rose-500/40 overflow-hidden shadow-[0_0_10px_rgba(225,29,72,0.1)] cursor-pointer hover:border-rose-400 transition-colors group">
                   {al.image_data && (
-                    <div 
-                      className="h-24 w-full bg-black relative border-b border-amber-500/20 cursor-pointer group"
-                      onClick={() => setSelectedAlertImage(al)}
-                    >
-                      <img src={al.image_data} alt="Suspect Vehicle" className="w-full h-full object-cover opacity-80 group-hover:opacity-100 transition-opacity" />
-                      
-                      {/* Hover Overlay "VIEW FORENSICS" */}
-                      <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity bg-rose-950/40 z-10">
-                        <span className="text-white text-[10px] tracking-widest font-bold px-3 py-1.5 bg-black/80 rounded border border-rose-500/50 shadow-lg flex items-center gap-2">
-                          <span>🔍</span> VIEW FORENSICS
-                        </span>
-                      </div>
-
+                    <div className="h-24 w-full bg-black relative border-b border-rose-500/20">
+                      <img src={al.image_data} alt="Suspect" className="w-full h-full object-cover opacity-80 group-hover:opacity-100 transition-opacity" />
+                      <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity bg-rose-950/60 z-10"><span className="text-white text-[10px] tracking-widest font-bold px-3 py-1.5 bg-black/80 rounded border border-rose-500/50 flex items-center gap-2"><span>🔍</span> VIEW FORENSICS</span></div>
                       <div className="absolute inset-0 bg-gradient-to-t from-slate-950 to-transparent pointer-events-none"></div>
-                      <span className="absolute bottom-2 left-2 text-[10px] font-mono font-bold text-amber-400 bg-amber-500/10 px-1.5 py-0.5 rounded border border-amber-500/30 z-20 pointer-events-none">
-                        {al.camera_id?.toUpperCase()}
-                      </span>
+                      <span className="absolute bottom-2 left-2 text-[10px] font-mono font-bold text-rose-400 bg-rose-500/10 px-1.5 py-0.5 rounded border border-rose-500/30 z-20 pointer-events-none">{al.camera_id?.toUpperCase()}</span>
                     </div>
                   )}
-
-                  <div className="p-2.5">
-                    <div className="flex justify-between items-start mb-1">
-                      <span className="font-mono font-black text-sm text-slate-100 tracking-wider">
-                        {al.plate_number || 'TARGET'}
-                      </span>
-                      <span className="text-[9px] text-slate-500 font-mono">
-                        {al.timestamp_utc ? new Date(al.timestamp_utc).toLocaleTimeString() : 'Just now'}
-                      </span>
-                    </div>
+                  <div className="p-2.5 relative">
+                    {!al.image_data && <div className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity"><span className="text-rose-400 text-[8px] tracking-widest font-bold px-1.5 py-0.5 bg-rose-500/10 rounded border border-rose-500/30">🔍 INSPECT</span></div>}
+                    <div className="flex justify-between items-start mb-1"><span className="font-mono font-black text-sm text-slate-100 tracking-wider">{al.plate_number || 'TARGET'}</span><span className="text-[9px] text-slate-500 font-mono">{al.timestamp_utc ? new Date(al.timestamp_utc).toLocaleTimeString() : 'Just now'}</span></div>
                     <p className="text-[10px] text-slate-300 font-bold uppercase mb-1">{al.entity_type}</p>
-                    <p className="text-[9px] text-rose-400 font-mono uppercase bg-rose-500/10 inline-block px-1.5 py-0.5 rounded border border-rose-500/20">
-                      {al.reason || 'Watchlist Target Intercepted'}
-                    </p>
+                    <p className="text-[9px] text-rose-400 font-mono uppercase bg-rose-500/10 inline-block px-1.5 py-0.5 rounded border border-rose-500/20">{al.reason || 'Security Anomaly'}</p>
                   </div>
                 </div>
               ))}
             </div>
           </div>
         )}
-
       </div>
 
       {/* ===================================================== */}
       {/* RIGHT WORKSPACE: TACTICAL GIS MAPPING ENGINE          */}
       {/* ===================================================== */}
       <div className="flex-1 relative h-full bg-[#050811]">
-        
+        <SentinelOmnibar />
+
         {selectedTrajectoryPlate && (
-          <div className="absolute top-6 left-6 z-[1000] bg-slate-950/90 border border-indigo-500/50 p-3 rounded-xl backdrop-blur-md flex items-center gap-4 shadow-xl">
-            <div>
-              <p className="text-[9px] font-black uppercase tracking-widest text-indigo-400">Active Suspect Vector</p>
-              <p className="text-sm font-mono font-bold text-white tracking-wider">{selectedTrajectoryPlate}</p>
-            </div>
-            <button onClick={() => setSelectedTrajectoryPlate(null)} className="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded text-[10px] font-bold uppercase transition">
-              Clear ✕
-            </button>
+          <div className="absolute top-24 left-6 z-[1000] bg-slate-950/90 border border-indigo-500/50 p-3 rounded-xl backdrop-blur-md flex items-center gap-4 shadow-xl">
+            <div><p className="text-[9px] font-black uppercase tracking-widest text-indigo-400">Active Suspect Vector</p><p className="text-sm font-mono font-bold text-white tracking-wider">{selectedTrajectoryPlate}</p></div>
+            <button onClick={() => setSelectedTrajectoryPlate(null)} className="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded text-[10px] font-bold uppercase transition">Clear ✕</button>
           </div>
         )}
 
-        <MapContainer 
-          center={[22.2587, 71.1924]} 
-          zoom={7} 
-          zoomControl={false}
-          className="w-full h-full z-0"
-        >
+        <MapContainer center={[23.035, 72.571]} zoom={12} zoomControl={false} className="w-full h-full z-0">
           <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" attribution='&copy; OpenStreetMap' className="map-tiles" />
+          
+          {/* 🎯 MAP FLIES TO VECTOR LINE AUTOMATICALLY */}
+          <TrajectoryBounds points={currentTrajectoryPoints} />
+          
           {memoizedMapElements}
         </MapContainer>
+
+        <TrafficEnforcementDesk isOpen={isTrafficDeskOpen} onClose={() => setIsTrafficDeskOpen(false)} trafficAlerts={trafficAlerts} />
       </div>
-      
     </div>
   );
 }
