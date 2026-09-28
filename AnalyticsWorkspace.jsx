@@ -115,7 +115,107 @@ function WhepPlayer({ camId }) {
 }
 
 // =========================================================
-// 2. MAIN ANALYTICS WORKSPACE
+// 2. SENTINEL AGENTIC COPILOT (INLINE COMPONENT)
+// =========================================================
+function SentinelCopilot({ onClose }) {
+  const [query, setQuery] = useState('');
+  const [messages, setMessages] = useState([]);
+  const [loading, setLoading] = useState(false);
+
+  const handleSearch = async (e) => {
+    e.preventDefault();
+    if (!query.trim()) return;
+
+    setMessages(prev => [...prev, { role: 'operator', text: query }]);
+    setQuery('');
+    setLoading(true);
+
+    try {
+      const res = await fetch('http://localhost:5000/api/copilot', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt: query })
+      });
+      
+      const data = await res.json();
+      setMessages(prev => [...prev, { role: 'copilot', text: data.reply || data.error }]);
+    } catch (error) {
+      setMessages(prev => [...prev, { role: 'copilot', text: "SYSTEM ERROR: Unable to reach AI Core. Check Flask backend." }]);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="absolute inset-0 z-40 bg-slate-950/90 backdrop-blur-sm p-8 flex flex-col justify-end animate-in fade-in duration-300">
+      <div className="w-full max-w-4xl mx-auto bg-slate-900 border-2 border-emerald-500/30 rounded-xl shadow-[0_0_50px_rgba(16,185,129,0.15)] flex flex-col h-[70vh] mb-10 overflow-hidden">
+        
+        {/* Header */}
+        <div className="px-6 py-4 border-b border-emerald-500/20 bg-slate-900 flex justify-between items-center">
+          <h3 className="text-emerald-400 font-mono text-base font-black tracking-widest flex items-center gap-3">
+            <span className="w-3 h-3 rounded-full bg-emerald-500 animate-pulse shadow-[0_0_10px_rgba(16,185,129,0.8)]"></span>
+            SENTINEL OS COPILOT <span className="text-slate-500 font-normal text-xs ml-2">|| VERTEX AI COMMAND TERMINAL</span>
+          </h3>
+          <button onClick={onClose} className="text-slate-400 hover:text-white font-mono text-sm font-bold bg-slate-800 hover:bg-slate-700 px-3 py-1 rounded transition">
+            [ ESC ] CLOSE TERMINAL
+          </button>
+        </div>
+
+        {/* Chat Log */}
+        <div className="p-6 flex-1 overflow-y-auto flex flex-col gap-4 font-mono text-sm bg-slate-950/50 custom-scrollbar">
+          {messages.length === 0 && (
+            <div className="flex flex-col items-center justify-center h-full text-slate-500 space-y-4">
+              <span className="text-4xl">🧠</span>
+              <p className="italic text-center leading-relaxed">
+                LangChain Database Routing Active.<br/>
+                Try commanding the system: <span className="text-emerald-400 font-bold">"Find all white SUVs on SG Highway today."</span>
+              </p>
+            </div>
+          )}
+          {messages.map((msg, idx) => (
+            <div key={idx} className={`p-4 rounded-lg shadow-lg ${
+              msg.role === 'operator' 
+                ? 'bg-slate-800 text-blue-300 ml-12 border-l-4 border-blue-500' 
+                : 'bg-emerald-950/30 text-emerald-300 mr-12 border-l-4 border-emerald-500'
+            }`}>
+              <span className="opacity-50 text-[10px] font-black uppercase tracking-wider block mb-2">
+                [{msg.role}]
+              </span>
+              <div className="whitespace-pre-wrap leading-relaxed">{msg.text}</div>
+            </div>
+          ))}
+          {loading && (
+            <div className="p-4 mr-12 bg-emerald-950/20 text-emerald-500/70 border-l-4 border-emerald-500/30 rounded-lg animate-pulse">
+              <span className="text-xs">Processing spatial correlation...</span>
+            </div>
+          )}
+        </div>
+
+        {/* Input Form */}
+        <form onSubmit={handleSearch} className="p-4 border-t border-emerald-500/20 bg-slate-900 flex gap-3">
+          <input
+            type="text"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Enter natural language command..."
+            className="flex-1 bg-slate-950 border border-slate-700 text-emerald-100 px-5 py-4 rounded-lg focus:outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 font-mono text-sm transition-all"
+            autoFocus
+          />
+          <button 
+            type="submit" 
+            disabled={loading}
+            className="bg-emerald-600 hover:bg-emerald-500 text-slate-900 font-black px-8 py-4 rounded-lg font-mono transition-colors disabled:opacity-50 tracking-widest shadow-lg shadow-emerald-900/50"
+          >
+            EXECUTE
+          </button>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+// =========================================================
+// 3. MAIN ANALYTICS WORKSPACE
 // =========================================================
 export default function AnalyticsWorkspace({ camId: propCamId, userRole, userDept }) {
   const queryParams = new URLSearchParams(window.location.search);
@@ -129,6 +229,7 @@ export default function AnalyticsWorkspace({ camId: propCamId, userRole, userDep
   const [selectedImage, setSelectedImage] = useState(null);
   const [selectedTransit, setSelectedTransit] = useState(null);
   const [isEnhanced, setIsEnhanced] = useState(false);
+  const [showCopilot, setShowCopilot] = useState(false); // COPILOT STATE TOGGLE
 
   useEffect(() => {
     const unsubAlerts = onValue(ref(db, 'alerts'), (snap) => {
@@ -152,6 +253,13 @@ export default function AnalyticsWorkspace({ camId: propCamId, userRole, userDep
     return () => { unsubAlerts(); unsubTransits(); };
   }, [camId]);
 
+  // Handle ESC key to close Copilot
+  useEffect(() => {
+    const handleKeyDown = (e) => { if (e.key === 'Escape') setShowCopilot(false); };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, []);
+
   const handleAddWatchlist = async (e) => {
     if (e) e.preventDefault();
     if (!targetPlate.trim()) return;
@@ -165,9 +273,19 @@ export default function AnalyticsWorkspace({ camId: propCamId, userRole, userDep
     setTargetPlate('');
   };
 
+  // 🎯 NEW: DETERMINE IF THE LATEST INCIDENT IS A TRUE SECURITY THREAT (IGNORES TRAFFIC)
+  const isSecurityAlert = latestIncident && latestIncident.reason && 
+    !(latestIncident.reason.toUpperCase().includes('HELMET') || 
+      latestIncident.reason.toUpperCase().includes('WRONG-WAY') || 
+      latestIncident.reason.toUpperCase().includes('COMPOUND') ||
+      latestIncident.reason.toUpperCase().includes('SPEEDING'));
+
   return (
     <div className="flex h-screen bg-[#070b14] text-slate-100 font-sans select-none overflow-hidden relative">
       
+      {/* 🚀 COPILOT OVERLAY LAYER */}
+      {showCopilot && <SentinelCopilot onClose={() => setShowCopilot(false)} />}
+
       {/* FORENSIC TELEMETRY INSPECTOR MODAL */}
       {selectedImage && (
         <div 
@@ -223,7 +341,7 @@ export default function AnalyticsWorkspace({ camId: propCamId, userRole, userDep
                 </div>
               </div>
 
-              {/* TELEMETRY & CONFIDENCE OVERLAY (Bottom Left) */}
+              {/* TELEMETRY & CONFIDENCE OVERLAY */}
               {selectedTransit && (
                 <div className="absolute bottom-4 left-4 bg-slate-950/90 backdrop-blur-md border border-slate-700/80 p-3 rounded-xl flex flex-col gap-1.5 min-w-[300px] max-w-[320px] shadow-2xl">
                   <div className="flex justify-between items-start">
@@ -236,7 +354,6 @@ export default function AnalyticsWorkspace({ camId: propCamId, userRole, userDep
                       </span>
                     </div>
                     
-                    {/* DYNAMIC CONFIDENCE BADGE */}
                     <div className={`px-2 py-1 rounded-md text-[11px] font-black border ${
                       selectedTransit.confidence >= 0.85 
                         ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/40' 
@@ -252,7 +369,6 @@ export default function AnalyticsWorkspace({ camId: propCamId, userRole, userDep
                     NODE: {selectedTransit.camera_id?.toUpperCase()} | {new Date(selectedTransit.timestamp_utc).toLocaleString()}
                   </div>
 
-                  {/* LEGAL / OPERATIONAL SIGNIFICANCE PROMPT */}
                   {selectedTransit.confidence < 0.80 ? (
                     <div className="mt-1 text-[9px] leading-tight text-rose-400 flex items-start gap-1.5 font-medium bg-rose-950/30 p-1.5 rounded border border-rose-500/20">
                       <span className="text-sm leading-none">⚠️</span>
@@ -336,23 +452,47 @@ export default function AnalyticsWorkspace({ camId: propCamId, userRole, userDep
             </span>
             <h1 className="text-xl font-black text-white">Tactical Video Analytics & ANPR Feed</h1>
           </div>
-          <button onClick={() => window.close()} className="px-3 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-xs font-bold transition">
-            Close Window
-          </button>
+          <div className="flex items-center gap-3">
+            
+            {/* 🚀 NEW COPILOT LAUNCH BUTTON */}
+            <button 
+              onClick={() => setShowCopilot(true)} 
+              className="px-4 py-1.5 bg-emerald-600/20 hover:bg-emerald-600/40 border border-emerald-500/50 text-emerald-400 hover:text-emerald-300 rounded-lg text-xs font-black tracking-widest transition flex items-center gap-2"
+            >
+              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+              LAUNCH AI COPILOT
+            </button>
+
+            <button onClick={() => window.close()} className="px-3 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-xs font-bold transition">
+              Close Window
+            </button>
+          </div>
         </div>
 
         <div className="flex-1 min-h-0 relative mb-3">
-          {latestIncident && (
-            <div className="absolute top-4 left-4 right-4 bg-red-950/95 border-2 border-red-500 p-4 rounded-xl z-30 flex items-center justify-between shadow-[0_0_40px_rgba(239,68,68,0.5)] animate-in slide-in-from-top-4">
+          {/* 🎯 FIXED: RED BANNER NOW ONLY SHOWS FOR SECURITY THREATS AND IS FULLY CLICKABLE */}
+          {isSecurityAlert && (
+            <div 
+              className="absolute top-4 left-4 right-4 bg-red-950/95 border-2 border-red-500 p-4 rounded-xl z-30 flex items-center justify-between shadow-[0_0_40px_rgba(239,68,68,0.5)] animate-in slide-in-from-top-4 cursor-pointer hover:bg-red-900 transition-colors"
+              onClick={() => {
+                if (latestIncident?.image_data) {
+                  setSelectedImage(latestIncident.image_data);
+                  setSelectedTransit(latestIncident);
+                }
+              }}
+            >
               <div className="flex items-center gap-4">
                 <span className="text-4xl animate-pulse">🚨</span>
                 <div>
                   <h3 className="text-lg font-black tracking-widest text-red-500 uppercase">Watchlist Target Intercepted</h3>
-                  <p className="text-sm font-mono text-white">PLATE: {latestIncident.plate_number} | {latestIncident.entity_type}</p>
+                  <p className="text-sm font-mono text-white">PLATE: {latestIncident.plate_number} | {latestIncident.reason}</p>
                 </div>
               </div>
               <button 
-                onClick={() => setLatestIncident(null)}
+                onClick={(e) => { 
+                  e.stopPropagation(); // Prevents the modal from opening when trying to dismiss
+                  setLatestIncident(null); 
+                }}
                 className="bg-red-600 hover:bg-red-500 px-4 py-2 rounded-lg text-xs font-black uppercase tracking-wider transition"
               >
                 Acknowledge
@@ -381,6 +521,7 @@ export default function AnalyticsWorkspace({ camId: propCamId, userRole, userDep
           <div className="flex-1 bg-slate-900/70 border border-slate-800 rounded-xl p-4 flex flex-col justify-between">
             <span className="text-[10px] font-black uppercase text-slate-400">Active Sector Alert</span>
             <div>
+              {/* Note: This bottom panel will still display the newest vehicle plate whether it is traffic or security */}
               <p className="text-xl font-mono font-bold text-amber-400">{latestIncident?.plate_number || 'SECTOR SECURE'}</p>
               <p className="text-xs text-slate-400 capitalize">{latestIncident ? `${latestIncident.entity_type}` : 'Continuous Mesh Monitoring Active'}</p>
             </div>
@@ -389,7 +530,7 @@ export default function AnalyticsWorkspace({ camId: propCamId, userRole, userDep
       </div>
 
       {/* RIGHT PANEL: ANPR FEED */}
-      <div className="w-[380px] border-l border-slate-800 bg-[#0c1220] p-5 flex flex-col">
+      <div className="w-[380px] border-l border-slate-800 bg-[#0c1220] p-5 flex flex-col z-10">
         {role === 'admin' ? (
           <>
             <h2 className="text-sm font-black text-white mb-2 uppercase">Deploy Watchlist Target</h2>
